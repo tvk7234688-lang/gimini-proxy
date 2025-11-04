@@ -1,1 +1,1 @@
-# 2gimini-proxy
+# gimini-proxy
