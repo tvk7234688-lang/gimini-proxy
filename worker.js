@@ -7,6 +7,7 @@ export default {
       'Access-Control-Allow-Headers': 'Content-Type, Authorization',
     };
 
+    // 处理预检请求
     if (request.method === 'OPTIONS') {
       return new Response(null, { headers: corsHeaders });
     }
@@ -16,7 +17,7 @@ export default {
 
     // 处理模型列表请求
     if ((path === '/models' || path === '/v1/models') && request.method === 'GET') {
-      const models = {
+      const modelsResponse = {
         object: "list",
         data: [
           {
@@ -27,8 +28,9 @@ export default {
           }
         ]
       };
-      return new Response(JSON.stringify(models), { 
-        headers: { ...corsHeaders, 'Content-Type': 'application/json' } 
+      
+      return new Response(JSON.stringify(modelsResponse), {
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' }
       });
     }
 
@@ -38,16 +40,26 @@ export default {
         const requestData = await request.json();
         const { messages } = requestData;
         
-        if (!messages) {
+        if (!messages || !Array.isArray(messages)) {
           return new Response(JSON.stringify({ error: 'No messages provided' }), {
             status: 400,
             headers: { ...corsHeaders, 'Content-Type': 'application/json' }
           });
         }
 
+        // 从环境变量获取 API 密钥
+        const apiKey = env.GEMINI_API_KEY;
+        if (!apiKey) {
+          return new Response(JSON.stringify({ error: 'API key not configured' }), {
+            status: 500,
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+          });
+        }
+
+        // 构建提示
         const prompt = messages.map(msg => `${msg.role}: ${msg.content}`).join('\n');
-        const apiKey = env.GEMINI_API_KEY; // 从环境变量获取
-        
+
+        // 调用 Gemini API
         const geminiResponse = await fetch(
           `https://generativelanguage.googleapis.com/v1/models/gemini-pro:generateContent?key=${apiKey}`,
           {
@@ -64,6 +76,7 @@ export default {
         );
 
         if (!geminiResponse.ok) {
+          const errorText = await geminiResponse.text();
           return new Response(JSON.stringify({ 
             error: `Gemini API error: ${geminiResponse.status}` 
           }), {
@@ -73,20 +86,35 @@ export default {
         }
 
         const geminiData = await geminiResponse.json();
+        
+        if (!geminiData.candidates || !geminiData.candidates[0]) {
+          return new Response(JSON.stringify({ error: 'No response from Gemini' }), {
+            status: 500,
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+          });
+        }
+
         const text = geminiData.candidates[0].content.parts[0].text;
 
+        // 转换为 OpenAI 格式
         const openAIResponse = {
           id: 'chatcmpl-' + Date.now(),
           object: 'chat.completion',
           created: Math.floor(Date.now() / 1000),
           model: 'gemini-pro',
           choices: [{
+            index: 0,
             message: {
               role: 'assistant',
               content: text
             },
             finish_reason: 'stop'
-          }]
+          }],
+          usage: {
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            total_tokens: 0
+          }
         };
 
         return new Response(JSON.stringify(openAIResponse), {
@@ -99,6 +127,16 @@ export default {
           headers: { ...corsHeaders, 'Content-Type': 'application/json' }
         });
       }
+    }
+
+    // 处理根路径
+    if (path === '/' && request.method === 'GET') {
+      return new Response(JSON.stringify({ 
+        status: 'Gemini Proxy is running',
+        endpoints: ['GET /v1/models', 'POST /v1/chat/completions']
+      }), {
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+      });
     }
 
     return new Response(JSON.stringify({ error: 'Endpoint not found' }), {
