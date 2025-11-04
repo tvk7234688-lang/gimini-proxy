@@ -1,5 +1,10 @@
 export default {
   async fetch(request, env) {
+    // 立即检查环境变量
+    console.log('环境变量检查开始');
+    console.log('GEMINI_API_KEY 存在:', !!env.GEMINI_API_KEY);
+    console.log('GEMINI_API_KEY 长度:', env.GEMINI_API_KEY ? env.GEMINI_API_KEY.length : 0);
+    
     // 设置 CORS 头
     const corsHeaders = {
       'Access-Control-Allow-Origin': '*',
@@ -37,6 +42,18 @@ export default {
     // 处理聊天请求
     if ((path === '/chat/completions' || path === '/v1/chat/completions') && request.method === 'POST') {
       try {
+        // 检查环境变量
+        if (!env.GEMINI_API_KEY) {
+          console.error('错误: GEMINI_API_KEY 未设置');
+          return new Response(JSON.stringify({ 
+            error: 'API key not configured in environment variables',
+            details: 'Please check Cloudflare Worker environment variables'
+          }), {
+            status: 500,
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+          });
+        }
+
         const requestData = await request.json();
         const { messages } = requestData;
         
@@ -47,21 +64,14 @@ export default {
           });
         }
 
-        // 从环境变量获取 API 密钥
-        const apiKey = env.GEMINI_API_KEY;
-        if (!apiKey) {
-          return new Response(JSON.stringify({ error: 'API key not configured' }), {
-            status: 500,
-            headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-          });
-        }
-
         // 构建提示
         const prompt = messages.map(msg => `${msg.role}: ${msg.content}`).join('\n');
 
+        console.log('调用 Gemini API，密钥长度:', env.GEMINI_API_KEY.length);
+
         // 调用 Gemini API
         const geminiResponse = await fetch(
-          `https://generativelanguage.googleapis.com/v1/models/gemini-pro:generateContent?key=${apiKey}`,
+          `https://generativelanguage.googleapis.com/v1/models/gemini-pro:generateContent?key=${env.GEMINI_API_KEY}`,
           {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -77,6 +87,7 @@ export default {
 
         if (!geminiResponse.ok) {
           const errorText = await geminiResponse.text();
+          console.error('Gemini API 错误:', geminiResponse.status, errorText);
           return new Response(JSON.stringify({ 
             error: `Gemini API error: ${geminiResponse.status}` 
           }), {
@@ -117,11 +128,13 @@ export default {
           }
         };
 
+        console.log('成功返回响应');
         return new Response(JSON.stringify(openAIResponse), {
           headers: { ...corsHeaders, 'Content-Type': 'application/json' }
         });
 
       } catch (error) {
+        console.error('处理请求时出错:', error);
         return new Response(JSON.stringify({ error: error.message }), {
           status: 500,
           headers: { ...corsHeaders, 'Content-Type': 'application/json' }
