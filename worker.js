@@ -1,10 +1,5 @@
 export default {
   async fetch(request, env) {
-    // 立即检查环境变量
-    console.log('环境变量检查开始');
-    console.log('GEMINI_API_KEY 存在:', !!env.GEMINI_API_KEY);
-    console.log('GEMINI_API_KEY 长度:', env.GEMINI_API_KEY ? env.GEMINI_API_KEY.length : 0);
-    
     // 设置 CORS 头
     const corsHeaders = {
       'Access-Control-Allow-Origin': '*',
@@ -26,7 +21,19 @@ export default {
         object: "list",
         data: [
           {
-            id: "gemini-pro",
+            id: "gemini-1.5-flash",
+            object: "model",
+            created: 1677610602,
+            owned_by: "google"
+          },
+          {
+            id: "gemini-1.5-pro",
+            object: "model",
+            created: 1677610602,
+            owned_by: "google"
+          },
+          {
+            id: "gemini-1.0-pro",
             object: "model",
             created: 1677610602,
             owned_by: "google"
@@ -44,10 +51,8 @@ export default {
       try {
         // 检查环境变量
         if (!env.GEMINI_API_KEY) {
-          console.error('错误: GEMINI_API_KEY 未设置');
           return new Response(JSON.stringify({ 
-            error: 'API key not configured in environment variables',
-            details: 'Please check Cloudflare Worker environment variables'
+            error: 'API key not configured in environment variables'
           }), {
             status: 500,
             headers: { ...corsHeaders, 'Content-Type': 'application/json' }
@@ -67,31 +72,57 @@ export default {
         // 构建提示
         const prompt = messages.map(msg => `${msg.role}: ${msg.content}`).join('\n');
 
-        console.log('调用 Gemini API，密钥长度:', env.GEMINI_API_KEY.length);
+        // 尝试不同的模型和 API 版本
+        const endpoints = [
+          // 最新的模型
+          `https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key=${env.GEMINI_API_KEY}`,
+          `https://generativelanguage.googleapis.com/v1/models/gemini-1.5-pro:generateContent?key=${env.GEMINI_API_KEY}`,
+          // 传统模型
+          `https://generativelanguage.googleapis.com/v1/models/gemini-1.0-pro:generateContent?key=${env.GEMINI_API_KEY}`,
+          // 旧版 API
+          `https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key=${env.GEMINI_API_KEY}`,
+        ];
 
-        // 调用 Gemini API
-        const geminiResponse = await fetch(
-          `https://generativelanguage.googleapis.com/v1/models/gemini-pro:generateContent?key=${env.GEMINI_API_KEY}`,
-          {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              contents: [{ parts: [{ text: prompt }] }],
-              generationConfig: {
-                temperature: 0.7,
-                maxOutputTokens: 2048,
-              }
-            })
+        let geminiResponse;
+        let lastError;
+        let successfulEndpoint;
+
+        for (const endpoint of endpoints) {
+          try {
+            console.log('尝试端点:', endpoint);
+            geminiResponse = await fetch(endpoint, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                contents: [{ parts: [{ text: prompt }] }],
+                generationConfig: {
+                  temperature: 0.7,
+                  maxOutputTokens: 2048,
+                }
+              })
+            });
+            
+            if (geminiResponse.ok) {
+              successfulEndpoint = endpoint;
+              break;
+            } else {
+              const errorText = await geminiResponse.text();
+              lastError = { endpoint, status: geminiResponse.status, error: errorText };
+              console.log(`端点失败 ${endpoint}:`, geminiResponse.status);
+            }
+          } catch (error) {
+            lastError = { endpoint, error: error.message };
+            console.log(`端点错误 ${endpoint}:`, error.message);
           }
-        );
+        }
 
-        if (!geminiResponse.ok) {
-          const errorText = await geminiResponse.text();
-          console.error('Gemini API 错误:', geminiResponse.status, errorText);
+        if (!geminiResponse || !geminiResponse.ok) {
+          console.error('所有端点都失败了:', lastError);
           return new Response(JSON.stringify({ 
-            error: `Gemini API error: ${geminiResponse.status}` 
+            error: 'All Gemini API endpoints failed',
+            details: lastError
           }), {
-            status: geminiResponse.status,
+            status: 404,
             headers: { ...corsHeaders, 'Content-Type': 'application/json' }
           });
         }
@@ -106,13 +137,18 @@ export default {
         }
 
         const text = geminiData.candidates[0].content.parts[0].text;
+        
+        // 从成功的端点提取模型名称
+        const modelName = successfulEndpoint.includes('gemini-1.5-flash') ? 'gemini-1.5-flash' :
+                         successfulEndpoint.includes('gemini-1.5-pro') ? 'gemini-1.5-pro' :
+                         successfulEndpoint.includes('gemini-1.0-pro') ? 'gemini-1.0-pro' : 'gemini-pro';
 
         // 转换为 OpenAI 格式
         const openAIResponse = {
           id: 'chatcmpl-' + Date.now(),
           object: 'chat.completion',
           created: Math.floor(Date.now() / 1000),
-          model: 'gemini-pro',
+          model: modelName,
           choices: [{
             index: 0,
             message: {
@@ -128,7 +164,7 @@ export default {
           }
         };
 
-        console.log('成功返回响应');
+        console.log(`成功使用端点: ${successfulEndpoint}`);
         return new Response(JSON.stringify(openAIResponse), {
           headers: { ...corsHeaders, 'Content-Type': 'application/json' }
         });
